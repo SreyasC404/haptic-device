@@ -59,6 +59,7 @@
 #include <thread>
 #include <mutex>
 #include <atomic>
+#include <optional>
 
 #include <stdexcept>
 
@@ -1181,41 +1182,95 @@ double getStrongestScalarProj(cVector3d v) {
   return strongest;
 }
 
+void recordForceHistory(Atom *current) {
+  constexpr double REST_ERR = 0.001;
+
+  if (!simulating) return;
+  if (current->getForce().length() < REST_ERR) return;
+
+  prevForces[prevForcesIndex] = current->getForce();
+  prevForcesIndex = (prevForcesIndex + 1) % MAX_FORCE_HISTORY;
+}
+
+std::optional<cVector3d> updateStandbyModeSimulating(Atom *current, cVector3d& position, double timeInterval) {
+  constexpr double HAPTIC_RADIUS = .08;
+  constexpr double K_HAPTIC = 1; // spring constant for applying vector projection
+
+  if (position.length() < HAPTIC_RADIUS) {
+    cVector3d temp = current->getLocalPos();
+    current->setLocalPos(getNewAtomPosition(current, prevPositions[currentIndex], timeInterval));
+    prevPositions[currentIndex] = temp;
+
+    double distFromCenter = position.length() - finalErr;
+    position.normalize();
+    return getStrongestScalarProj(-position) * -position * (distFromCenter / HAPTIC_RADIUS) * K_HAPTIC;
+  }
+  simulating = false;
+  return std::nullopt;
+}
+
+std::optional<cVector3d> updateStandbyState(Atom *current, const cVector3d& position) {
+  // position err acceptable for return mechanism to return to center
+  constexpr double SETTLING_ERR = .05; 
+  constexpr double K_RETURN = 25;
+
+  if (position.length() >= SETTLING_ERR) {
+    if (resetting && confirming) {
+      cout << "Not yet settled!" << endl;
+    }
+    confirming = false;
+    if (positionClock.getCurrentTimeSeconds() >= 2.5 || resetting) {
+      positionClock.stop();
+      positionClock.reset();
+      if (!resetting) {
+        cout << "Resetting to center..." << endl;
+      }
+      resetting = true;
+      
+      const double MAX_FORCE = 1.6; // maximum force the return mechanism should output
+      
+      cVector3d returnVector = -position * K_RETURN;
+      return clampVectorMagnitude(returnVector, MAX_FORCE);
+    }
+  } else {
+    if (!confirming) {
+      cout << "Starting confirmation..." << endl;
+      positionClock.start();
+      confirming = true;
+    }
+    if (positionClock.getCurrentTimeSeconds() >= .5) {
+      cout << "Done!" << endl;
+      standby = false;
+      resetting = false;
+      confirming = false;
+      prevHapticInitialized = false;
+      simulating = true;
+      positionClock.stop();
+      positionClock.reset();
+
+      prevPositions[currentIndex] = current->getLocalPos();
+      finalErr = position.length();
+    }
+    return cVector3d(0,0,0);
+  }
+  return std::nullopt;
+}
+
 cVector3d standbyModeUpdate(Atom *current, cVector3d position, const double timeInterval) {
+  constexpr double STANDBY_ERR = .1; // movement err acceptable for standby mode to activate
+
   if (!prevHapticInitialized) {
     prevHapticInitialized = true;
     prevHapticPosition = position;
   }
-  const int REST_ERR = .001;
-  if (simulating && current->getForce().length() >= REST_ERR) {
-    prevForces[prevForcesIndex] = current->getForce();
-    prevForcesIndex++;
-    prevForcesIndex %= MAX_FORCE_HISTORY;
-  }
-  
+  recordForceHistory(current);
+
   cVector3d dPHaptic = position - prevHapticPosition;
   prevHapticPosition = position;
-  
-  const double K_RETURN = 25; // spring constant for return haptic controller to center
-  const double K_HAPTIC = 1; // spring constant for applying vector projection
 
-  // position err acceptable for return mechanism to return to center
-  const double SETTLING_ERR = .05; 
-
-  const double STANDBY_ERR = .1; // movement err acceptable for standby mode to activate
-  const double HAPTIC_RADIUS = .08; // "escape" radius to get out of simulating mode
-
-  if (simulating) {  
-    if (position.length() < HAPTIC_RADIUS) {
-      cVector3d temp = current->getLocalPos();
-      current->setLocalPos(getNewAtomPosition(current, prevPositions[currentIndex], timeInterval));
-      prevPositions[currentIndex] = temp;
-
-      double distFromCenter = position.length() - finalErr;
-      position.normalize();
-      return getStrongestScalarProj(-position) * -position * (distFromCenter / HAPTIC_RADIUS) * K_HAPTIC;
-    }
-    simulating = false;
+  if (simulating) {
+    auto pos = updateStandbyModeSimulating(current, position, timeInterval);
+    if (pos) return *pos;
   } else {
     if (dPHaptic.length() < STANDBY_ERR && !standby && position.length() >= .01) {
       positionClock.start();
@@ -1223,47 +1278,10 @@ cVector3d standbyModeUpdate(Atom *current, cVector3d position, const double time
       cout << "Entering standby mode..." << endl;
     }
     if (standby) {
-      if (position.length() >= SETTLING_ERR) {
-        if (resetting && confirming) {
-          cout << "Not yet settled!" << endl;
-        }
-        confirming = false;
-        if (positionClock.getCurrentTimeSeconds() >= 2.5 || resetting) {
-          positionClock.stop();
-          positionClock.reset();
-          if (!resetting) {
-            cout << "Resetting to center..." << endl;
-          }
-          resetting = true;
-          
-          const double MAX_FORCE = 1.6; // maximum force the return mechanism should output
-          
-          cVector3d returnVector = -position * K_RETURN;
-          return clampVectorMagnitude(returnVector, MAX_FORCE);
-        }
-      } else {
-        if (!confirming) {
-          cout << "Starting confirmation..." << endl;
-          positionClock.start();
-          confirming = true;
-        }
-        if (positionClock.getCurrentTimeSeconds() >= .5) {
-          cout << "Done!" << endl;
-          standby = false;
-          resetting = false;
-          confirming = false;
-          prevHapticInitialized = false;
-          simulating = true;
-          positionClock.stop();
-          positionClock.reset();
-
-          prevPositions[currentIndex] = current->getLocalPos();
-          finalErr = position.length();
-        }
-        return cVector3d(0,0,0);
-      }
+      auto pos = updateStandbyState(current, position);
+      if (pos) return *pos;
     }
-    
+
     if (dPHaptic.length() >= 1e-6 && standby && !resetting) { 
       standby = false;
       positionClock.stop();
@@ -1271,8 +1289,7 @@ cVector3d standbyModeUpdate(Atom *current, cVector3d position, const double time
       cout << "Standby cancelled!" << endl;
     }
   }
-  
-  
+
   current->setLocalPos(current->getLocalPos() + dPHaptic);
   return current->getForce();
 }
