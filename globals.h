@@ -84,15 +84,11 @@ extern cLabel *helpHeader;
 
 extern cPanel *helpPanel;
 
-extern cLabel *debugForceLabel;
-
-extern cLabel *debugNearestNeighborLabel;
-
-extern cLabel *debugPositionLabel;
-
-extern cLabel *debugMaxForceLabel;
+extern vector<cLabel *> debugLabels; 
 
 extern vector<cLabel *> debugAtomLabels;
+
+extern vector<cVector3d> initialPositions;
 
 extern std::atomic<int> screenshotCounter;
 

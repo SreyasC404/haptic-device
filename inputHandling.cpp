@@ -168,6 +168,12 @@ void keyCallback(GLFWwindow *a_window, int a_key, int a_scancode, int a_action,
   } else if (a_key == GLFW_KEY_D) {
       std::lock_guard<std::recursive_mutex> lock(sceneMutex);
       showDebug = !showDebug;
+  } else if (a_key == GLFW_KEY_T) {
+    std::lock_guard<std::recursive_mutex> lock(sceneMutex);
+    for (int i = 0; i < spheres.size(); i++) {
+        spheres[i]->setLocalPos(initialPositions[i]);
+        spheres[i]->setVelocity(0);
+    }
   }
 }
 

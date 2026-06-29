@@ -13,6 +13,9 @@ bool isNumber(char number[]);
 //add hotkey help labels
 void addHotkeyLabel(std::string key, std::string text);
 
+//add debug labels
+void addDebugLabel(std::string text);
+
 // add a label to the world with default black text
 void addLabel(chai3d::cLabel *&label);
 

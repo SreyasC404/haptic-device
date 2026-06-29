@@ -224,16 +224,10 @@ cLabel *scope_upper;
 cLabel *scope_lower;
 
 //label for debug force
-cLabel *debugForceLabel;
+vector<cLabel *> debugLabels;
 
-//label nearest neighbor
-cLabel *debugNearestNeighborLabel;
-
-//label position
-cLabel *debugPositionLabel;
-
-//label biggest force in the model
-cLabel *debugMaxForceLabel;
+//vector for resetting
+vector<cVector3d> initialPositions;
 
 //label for each atom
 vector<cLabel *> debugAtomLabels;
@@ -482,6 +476,9 @@ int main(int argc, char *argv[]) {
   // PLACE ATOMS
   placeAtoms(aseCell, asePbc, argc, argv);
   initializeAtomLabels(); 
+  for (int i = 0; i < spheres.size(); i++) {
+    initialPositions.push_back(spheres[i]->getLocalPos());
+  }
 
 
   // determine potential if specified
@@ -807,10 +804,10 @@ void initializeLabels() {
   addLabel(isFrozen); // frozen state label
   addLabel(camera_pos); // camera position label
   addLabel(potentialLabel); // energy surface label
-  addLabel(debugForceLabel); //debug force label
-  addLabel(debugNearestNeighborLabel);//debug neighbor
-  addLabel(debugPositionLabel);//debug current pos
-  addLabel(debugMaxForceLabel);//debug max force
+  addDebugLabel("Force magnitude: ");
+  addDebugLabel("Atom pos: ");  
+  addDebugLabel("Nearest neighbor: ");
+  addDebugLabel("Max force: ");
 
   // Add labels to the graph
   addLabel(scope_upper); 
@@ -864,6 +861,7 @@ void initializeHotkeyLabels() {
   addHotkeyLabel("c", "save configuration to .con");
   addHotkeyLabel("SPACE", "freeze atoms");
   addHotkeyLabel("d", "toggle debug info");
+  addHotkeyLabel("t", "reset atom structure");
   addHotkeyLabel("CTRL", "toggle help panel");
 }
 
@@ -924,7 +922,7 @@ void initializeHelpPanel() {
 
   helpPanel = new cPanel();
   helpPanel->setColor(panelColor);
-  helpPanel->setSize(520, 500);
+  helpPanel->setSize(520, 600);
   camera->m_frontLayer->addChild(helpPanel);
   helpPanel->setShowPanel(false);
 
@@ -1045,15 +1043,11 @@ void updateLabels() {
   if (showDebug) {
     // current atom force magnitude
     cVector3d force = spheres[currentIndex]->getForce();
-    debugForceLabel->setText("Force magnitude current atom: " + cStr(force.length(), 5));
-    debugForceLabel->setLocalPos(width-300, 80);
-    debugForceLabel->setShowEnabled(true);
+    debugLabels[0]->setText("Force magnitude: " + cStr(force.length(), 5));
 
     // current atom position
     cVector3d pos = spheres[currentIndex]->getLocalPos();
-    debugPositionLabel->setText("Atom pos: (" + cStr(pos.x(), 3) + ", " + cStr(pos.y(), 3) + ", " + cStr(pos.z(), 3) + ")");
-    debugPositionLabel->setLocalPos(width-300, 100);
-    debugPositionLabel->setShowEnabled(true);
+    debugLabels[1]->setText("Atom pos: (" + cStr(pos.x(), 3) + ", " + cStr(pos.y(), 3) + ", " + cStr(pos.z(), 3) + ")");
 
     // nearest neighbor distance
     double minDist = std::numeric_limits<double>::max();
@@ -1063,9 +1057,7 @@ void updateLabels() {
         if (dist < minDist) minDist = dist;
       }
     }
-    debugNearestNeighborLabel->setText("Nearest neighbor current atom: " + cStr(minDist / 0.02, 5) + " Ang");
-    debugNearestNeighborLabel->setLocalPos(width-300, 120);
-    debugNearestNeighborLabel->setShowEnabled(true);
+    debugLabels[2]->setText("Nearest neighbor: " + cStr(minDist / 0.02, 5) + " Ang");
 
     // max force across all atoms
     double maxForce = 0;
@@ -1077,24 +1069,25 @@ void updateLabels() {
         maxForceIndex = i;
       }
     }
-    debugMaxForceLabel->setText("Max force: " + cStr(maxForce, 5) + " (atom " + to_string(maxForceIndex) + ")");
-    debugMaxForceLabel->setLocalPos(width-300, 140);
-    debugMaxForceLabel->setShowEnabled(true);
+    debugLabels[3]->setText("Max force: " + cStr(maxForce, 5) + " (atom " + to_string(maxForceIndex) + ")");
+
+    // position and show all debug labels
+    for (int i = 0; i < debugLabels.size(); i++) {
+      debugLabels[i]->setLocalPos(width - 300, 80 + i * 20);
+      debugLabels[i]->setShowEnabled(true);
+    }
 
     // atom index labels
     for (int i = 0; i < debugAtomLabels.size(); i++) {
       cVector3d atomPos = spheres[i]->getLocalPos();
 
-      // get camera vectors
       cVector3d camPos = camera->getLocalPos();
       cVector3d camLook = camera->getLookVector();
       cVector3d camUp = camera->getUpVector();
       cVector3d camRight = camera->getRightVector();
 
-      // vector from camera to atom
       cVector3d toAtom = atomPos - camPos;
 
-      // check if atom is in front of camera
       double depth = toAtom.dot(camLook);
       if (depth > 0) {
         double fov = camera->getFieldViewAngleRad();
@@ -1112,10 +1105,9 @@ void updateLabels() {
     }
 
   } else {
-    debugForceLabel->setShowEnabled(false);
-    debugPositionLabel->setShowEnabled(false);
-    debugNearestNeighborLabel->setShowEnabled(false);
-    debugMaxForceLabel->setShowEnabled(false);
+    for (int i = 0; i < debugLabels.size(); i++) {
+      debugLabels[i]->setShowEnabled(false);
+    }
     for (int i = 0; i < debugAtomLabels.size(); i++) {
       debugAtomLabels[i]->setShowEnabled(false);
     }
@@ -1127,7 +1119,7 @@ void updateGraphics(void) {
 
   // UPDATE WIDGETS
   updateLabels();
-  helpPanel->setLocalPos(width - 550, height - 530);
+  helpPanel->setLocalPos(width - 550, height - 600);
   helpHeader->setLocalPos(width - 490, height - 70);
   
   const double potentialEnergy = displayedPotentialEnergy.load();
