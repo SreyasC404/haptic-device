@@ -645,6 +645,42 @@ void initializeHapticDevice() {
   }
 }
 
+void placeAtomsAse(std::array<double, 9> aseCell, std::array<int, 3> asePbc, cTexture2dPtr texture, char *argv[]) {
+  AseStructureData structure;
+  try {
+    structure = loadAseStructure(argv[2]);
+  } catch (const std::exception &ex) {
+    close();
+    throw std::runtime_error(ex.what());
+  }
+  const std::vector<std::array<double, 3>> &positions = structure.positions;
+  const std::vector<int> &startingAtomicNrs = structure.atomicNumbers;
+  aseCell = structure.cell;
+  asePbc = structure.pbc;
+  const int nAtoms = static_cast<int>(positions.size());
+
+  for (int i = 0; i < nAtoms; i++) {
+    Atom *newAtom = initializeAtom(texture, startingAtomicNrs[i]); // Create atom pointer
+    // Set the positions of all atoms
+    if (i == 0) {
+      // make very first atom the current atom
+      newAtom->setCurrent(true);
+      // get coordinates from pPositionTriplet
+      for (int j = 0; j < 3; j++) {
+        centerCoords[j] = positions[0][static_cast<size_t>(j)];
+      }
+      newAtom->setLocalPos(0.0, 0.0, 0.0); // set first atom at center of view
+    } else {
+      // newAtom->setAnchor(true); // Anchor by default
+      // scale coordinates and insert
+      newAtom->setLocalPos(
+          0.02 * (positions[i][0] - centerCoords[0]), // position offset -- should probably disappear once we get boxes working
+          0.02 * (positions[i][1] - centerCoords[1]),
+          0.02 * (positions[i][2] - centerCoords[2]));
+    }
+  }
+}
+
 void placeAtoms(std::array<double, 9> aseCell, std::array<int, 3> asePbc, int argc, char *argv[]) {
   cTexture2dPtr texture = cTexture2d::create(); // create texture
   // load texture file
@@ -669,41 +705,9 @@ void placeAtoms(std::array<double, 9> aseCell, std::array<int, 3> asePbc, int ar
         initializeAtomPosition(new_atom); // set the position of the atom
       }
     }
-  } else { // read in specified file
-    AseStructureData structure;
-    try {
-      structure = loadAseStructure(argv[2]);
-    } catch (const std::exception &ex) {
-      close();
-      throw std::runtime_error(ex.what());
-    }
-    const std::vector<std::array<double, 3>> &positions = structure.positions;
-    const std::vector<int> &startingAtomicNrs = structure.atomicNumbers;
-    aseCell = structure.cell;
-    asePbc = structure.pbc;
-    const int nAtoms = static_cast<int>(positions.size());
+  } else // read in specified file
+    placeAtomsAse(aseCell, asePbc, texture, argv);
 
-    for (int i = 0; i < nAtoms; i++) {
-      Atom *newAtom = initializeAtom(texture, startingAtomicNrs[i]); // Create atom pointer
-      // Set the positions of all atoms
-      if (i == 0) {
-        // make very first atom the current atom
-        newAtom->setCurrent(true);
-        // get coordinates from pPositionTriplet
-        for (int j = 0; j < 3; j++) {
-          centerCoords[j] = positions[0][static_cast<size_t>(j)];
-        }
-        newAtom->setLocalPos(0.0, 0.0, 0.0); // set first atom at center of view
-      } else {
-        // newAtom->setAnchor(true); // Anchor by default
-        // scale coordinates and insert
-        newAtom->setLocalPos(
-            0.02 * (positions[i][0] - centerCoords[0]), // position offset -- should probably disappear once we get boxes working
-            0.02 * (positions[i][1] - centerCoords[1]),
-            0.02 * (positions[i][2] - centerCoords[2]));
-      }
-    }
-  }
   // Done reading any sort of info.
   for (int i = 0; i < spheres.size(); i++) {
     spheres[i]->setVelocity(0);
