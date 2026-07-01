@@ -6,6 +6,7 @@
 #include <mutex>
 
 int just_unanchored = 0;
+bool transparentAtoms = false;
 
 // CHAI3D renders into the framebuffer, which is measured in pixels. On HiDPI /
 // Retina displays the framebuffer is larger than the window (measured in points),
@@ -195,6 +196,17 @@ void keyCallback(GLFWwindow *a_window, int a_key, int a_scancode, int a_action,
       spheres[i]->setLocalPos(initialPositions[i]);
       spheres[i]->setVelocity(0);
     }
+  } else if (a_key == GLFW_KEY_F1) {
+    if (!transparentAtoms) {
+      for (int i = 0; i < spheres.size(); i++) {
+        spheres[i]->setTransparencyLevel(0.0);
+      }
+    } else {
+      for (int i = 0; i < spheres.size(); i++) {
+        spheres[i]->setTransparencyLevel(1.0);
+      }
+    }
+    transparentAtoms = !transparentAtoms;
   }
 }
 
