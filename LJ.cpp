@@ -1213,27 +1213,37 @@ std::optional<cVector3d> updateStandbyModeSimulating(Atom *current, cVector3d& p
   return std::nullopt;
 }
 
-std::optional<cVector3d> updateStandbyState(Atom *current, const cVector3d& position) {
+std::optional<cVector3d> updateStandbyState(Atom *current, const cVector3d& position,
+                                          const cVector3d& dPHaptic) {
   // position err acceptable for return mechanism to return to center
-  constexpr double SETTLING_ERR = .05; 
+  constexpr double SETTLING_ERR = .05;
   constexpr double K_RETURN = 25;
+  constexpr double K_DAMPING = 8.0;
+  constexpr double RETURN_DELAY_SECONDS = 5.0;
 
   if (position.length() >= SETTLING_ERR) {
     if (resetting && confirming) {
       cout << "Not yet settled!" << endl;
     }
     confirming = false;
-    if (positionClock.getCurrentTimeSeconds() >= 2.5 || resetting) {
+    if (positionClock.getCurrentTimeSeconds() >= RETURN_DELAY_SECONDS || resetting) {
       positionClock.stop();
       positionClock.reset();
       if (!resetting) {
         cout << "Resetting to center..." << endl;
       }
       resetting = true;
-      
+
       const double MAX_FORCE = 1.6; // maximum force the return mechanism should output
-      
-      cVector3d returnVector = -position * K_RETURN;
+
+      double distanceFromCenter = position.length();
+      double springScale = 0.5 + (distanceFromCenter / (SETTLING_ERR * 2.0));
+      if (springScale > 1.0) {
+        springScale = 1.0;
+      }
+
+      cVector3d returnVector = -position * (K_RETURN * springScale);
+      returnVector -= (dPHaptic * K_DAMPING);
       return clampVectorMagnitude(returnVector, MAX_FORCE);
     }
   } else {
@@ -1282,7 +1292,7 @@ cVector3d standbyModeUpdate(Atom *current, cVector3d position, const double time
       cout << "Entering standby mode..." << endl;
     }
     if (standby) {
-      auto pos = updateStandbyState(current, position);
+      auto pos = updateStandbyState(current, position, dPHaptic);
       if (pos) return *pos;
     }
 
