@@ -10,3 +10,9 @@ void mouseButtonCallback(GLFWwindow *a_window, int a_button, int a_action,
 
 // callback to handle mouse motion
 void mouseMotionCallback(GLFWwindow *a_window, double a_posX, double a_posY);
+
+// anchor every atom except the currently selected one
+void anchorAllAtoms();
+
+// unanchor every atom
+void unanchorAllAtoms();

@@ -1,4 +1,5 @@
 #include "globals.h"
+#include "inputHandling.h"
 #include "utility.h"
 #include <GLFW/glfw3.h>
 #include <sys/stat.h>
@@ -6,6 +7,7 @@
 #include <mutex>
 
 int just_unanchored = 0;
+bool transparentAtoms = false;
 
 // CHAI3D renders into the framebuffer, which is measured in pixels. On HiDPI /
 // Retina displays the framebuffer is larger than the window (measured in points),
@@ -166,15 +168,67 @@ void keyCallback(GLFWwindow *a_window, int a_key, int a_scancode, int a_action,
   } else if (a_key == GLFW_KEY_F) {
     toggleFullscreen();
   } else if (a_key == GLFW_KEY_U) {
-    unanchorAtoms();
+    // action - unanchor all key
+    unanchorAllAtoms();
+    assert(just_unanchored = 5);
+    just_unanchored = 0;
   } else if (a_key == GLFW_KEY_S) {
     saveScreenshot();
   } else if (a_key == GLFW_KEY_SPACE) {
     freezeAtoms = !freezeAtoms;
-  } else if (a_key == GLFW_KEY_C) {
-    saveConFile();
+  } else if (a_key == GLFW_KEY_1 && a_action == GLFW_PRESS) {  // toggle atom rendering
+    renderAtoms = !renderAtoms;
+  } else if (a_key == GLFW_KEY_2 && a_action == GLFW_PRESS) {  // toggle force vector rendering
+    renderForceVectors = !renderForceVectors;
+  } else if (a_key == GLFW_KEY_3 && a_action == GLFW_PRESS) {  // toggle bond rendering
+    renderBonds = !renderBonds;
+  } else if (a_key == GLFW_KEY_I) {  // move current atom up
+    moveCurrentAtom(0, 1, 0);
+  } else if (a_key == GLFW_KEY_K) {  // move current atom down
+    moveCurrentAtom(0, -1, 0);
+  } else if (a_key == GLFW_KEY_J) {  // move current atom left
+    moveCurrentAtom(-1, 0, 0);
+  } else if (a_key == GLFW_KEY_L) {  // move current atom right
+    moveCurrentAtom(1, 0, 0);
+  } else if (a_key == GLFW_KEY_O) {  // move current atom forward (away from camera)
+    moveCurrentAtom(0, 0, 1);
+  } else if (a_key == GLFW_KEY_P) {  // move current atom backward (toward camera)
+    moveCurrentAtom(0, 0, -1);
+  } else if (a_key == GLFW_KEY_C) {  // save atoms to con file
+    std::lock_guard<std::recursive_mutex> lock(sceneMutex);
+    ofstream writeFile;
+    string dir1 = "./log/";
+    struct stat buffer;
+    if (stat(dir1.c_str(), &buffer) != 0) { // Check if log directory exists
+      char cstr[dir1.size() + 1];
+      strcpy(cstr, dir1.c_str());
+      mkdir(cstr, 0777);
+    }
+
+    // Find local date
+    time_t now = time(0);
+    tm *ltm = localtime(&now);
+    int year = 1900 + ltm -> tm_year;
+    int month = 1 + ltm -> tm_mon;
+    int day = ltm -> tm_mday;
+    string date = to_string(month) + "-" + to_string(day) + "-" + to_string(year);
+    string dir2 = dir1 + date + "/";
+    if (stat(dir2.c_str(), &buffer) != 0) { // Check if date directory exists
+      char cstr[dir2.size() + 1];
+      strcpy(cstr, dir2.c_str());
+      mkdir(cstr, 0777);
+    }
+    // Prevent overwriting .con files
+    int index = 0;
+    while (fileExists(dir2 + "atoms" + to_string(index) + ".con")) {
+      index++;
+    }
+    writeConCounter = 5000;
+    writeToCon(dir2 + "atoms" + to_string(index) + ".con");
+    cout << "LOGGED AT " + date + " atoms" + to_string(index) + ".con" << endl;
   } else if (a_key == GLFW_KEY_A) {
-    anchorAtoms();
+    // anchor all atoms while maintaining control
+    anchorAllAtoms();
   } else if (a_key == GLFW_KEY_UP || a_key == GLFW_KEY_DOWN) {
     moveCameraVertical(a_key == GLFW_KEY_UP);
   } else if (a_key == GLFW_KEY_RIGHT || a_key == GLFW_KEY_LEFT) {
@@ -195,6 +249,17 @@ void keyCallback(GLFWwindow *a_window, int a_key, int a_scancode, int a_action,
       spheres[i]->setLocalPos(initialPositions[i]);
       spheres[i]->setVelocity(0);
     }
+  } else if (a_key == GLFW_KEY_F1) {
+    if (!transparentAtoms) {
+      for (int i = 0; i < spheres.size(); i++) {
+        spheres[i]->setTransparencyLevel(0.0);
+      }
+    } else {
+      for (int i = 0; i < spheres.size(); i++) {
+        spheres[i]->setTransparencyLevel(1.0);
+      }
+    }
+    transparentAtoms = !transparentAtoms;
   }
 }
 
@@ -284,4 +349,22 @@ void mouseButtonCallback(GLFWwindow *a_window, int a_button, int a_action,
     } else {
         mouseState = MOUSE_IDLE;
     }
+}
+
+void anchorAllAtoms() {
+  std::lock_guard<std::recursive_mutex> lock(sceneMutex);
+  for (auto i{0}; i < spheres.size(); i++) {
+    if (!spheres[i]->isAnchor() && !(spheres[i]->isCurrent())) {
+      spheres[i]->setAnchor(true);
+    }
+  }
+}
+
+void unanchorAllAtoms() {
+  std::lock_guard<std::recursive_mutex> lock(sceneMutex);
+  for (auto i{0}; i < spheres.size(); i++) {
+    if (spheres[i]->isAnchor()) {
+      spheres[i]->setAnchor(false);
+    }
+  }
 }

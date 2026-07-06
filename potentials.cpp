@@ -1,3 +1,8 @@
+// Computes interatomic forces and potential energies.
+// The native Morse and LJ calculators run entirely in C++.
+// The ASE calculator delegates to Python via the embedded interpreter,
+// which allows using any ASE-compatible physics engine including ML potentials.
+
 #include "potentials.h"
 
 #include <Python.h>
@@ -24,19 +29,32 @@ extern double centerCoords[3];
 namespace
 {
 
+    // Haptic display coordinates are in meters; ASE expects angstroms.
+    // This factor converts between the two when passing positions to Python
+    // and when interpreting forces coming back.
     constexpr double kDistanceScale = 0.02;
-    PyObject *calcObject = nullptr;
-    PyObject *aseModule = nullptr;
-    PyObject *atomsClass = nullptr;
 
+    // These are module-level handles to the Python objects we reuse across frames.
+    // They are initialized once in parseCalculatorSpec and kept alive for the
+    // lifetime of the simulation.
+    PyObject *calcObject = nullptr;   // the ASE calculator instance
+    PyObject *aseModule = nullptr;    // the top-level ase module
+    PyObject *atomsClass = nullptr;   // ase.Atoms constructor
+
+    // The Atoms object is created on the first call to runAseCalculation,
+    // then reused with updated positions on every subsequent frame.
     PyObject *atomsObject = nullptr;
 
+    // Prints the Python traceback before exiting so the user can see what went wrong.
     [[noreturn]] void failWithPythonError(const char *message) {
         PyErr_Print();
         std::cerr << message << std::endl;
         std::exit(1);
     }
 
+    // Python is initialized lazily, only when the ASE calculator is first used.
+    // We configure it to use the bundled virtual environment so ASE and its
+    // dependencies are found correctly regardless of the system Python.
     void ensurePythonInitialized() {
         if (!Py_IsInitialized()) {
             PyConfig config;
@@ -45,6 +63,7 @@ namespace
             config.isolated = 0;
             config.use_environment = 1;
 
+            // Point to the venv Python so sys.path picks up the right site-packages.
             config.program_name = Py_DecodeLocale(
                 "./haptic-device/uma_env/bin/python",
                 NULL);
@@ -60,6 +79,8 @@ namespace
                 std::exit(1);
             }
 
+            // Print diagnostic info at startup to confirm the right interpreter
+            // and ASE installation are being used.
             PyRun_SimpleString(
                 "import sys\n"
                 "print('\\n=== EMBEDDED PYTHON DEBUG ===')\n"
@@ -76,6 +97,7 @@ namespace
                 "    print('ASE IMPORT FAILED:', e)\n"
                 "print('=============================\\n')\n"
             );
+            // Release the GIL so the haptic thread can run while Python is idle.
             PyEval_SaveThread();
         }
     }
@@ -98,6 +120,8 @@ namespace
         return callable;
     }
 
+    // Converts atom positions from display space back to ASE coordinates
+    // by reversing the distance scale and re-adding the world center offset.
     std::vector<double> flattenPositions(const std::vector<Atom *> &spheres) {
         std::vector<double> positions;
         positions.reserve(spheres.size() * 3);
@@ -151,6 +175,8 @@ namespace
         return numbers;
     }
 
+    // Positions are passed as a flat C++ vector, but ASE expects an Nx3 nested list.
+    // This reshapes the data before handing it to Python.
     PyObject *buildPositionsList(const std::vector<double> &positions) {
         PyObject *rows = PyList_New(positions.size() / 3);
         if (rows == nullptr) {
@@ -178,6 +204,7 @@ namespace
         return rows;
     }
 
+    // The cell is a 3x3 matrix of lattice vectors that defines the periodic simulation box.
     PyObject *buildCellList(const std::array<double, 9> &cellMatrix) {
         PyObject *cell = PyList_New(3);
         if (cell == nullptr) {
@@ -207,6 +234,8 @@ namespace
         return cell;
     }
 
+    // Periodic boundary conditions: one boolean per axis.
+    // When true, atoms that leave one side of the box reenter from the opposite side.
     PyObject *buildPbcList(const std::array<int, 3> &periodicBoundaryConditions) {
         PyObject *pbc = PyList_New(3);
         if (pbc == nullptr) {
@@ -225,6 +254,9 @@ namespace
         return pbc;
     }
 
+    // The kwargs string is user-supplied configuration for the calculator (e.g. model name,
+    // cutoff radius). We use ast.literal_eval rather than eval for safety: it only
+    // accepts Python literals, not arbitrary code.
     PyObject *buildKwargsDict(const std::string &kwargsText) {
         if (kwargsText.empty()) {
             return PyDict_New();
@@ -253,10 +285,35 @@ namespace
         return parsedKwargs;
     }
 
+    // Only works on Linux: reads /proc/self/exe to determine the executable's directory.
+    std::string getExecutableDir()
+    {
+        char buffer[4096];
+        ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
+        if (length <= 0)
+        {
+            return "";
+        }
+
+        buffer[length] = '\0';
+        std::string executablePath(buffer);
+        size_t separator = executablePath.find_last_of('/');
+        if (separator == std::string::npos)
+        {
+            return "";
+        }
+
+        return executablePath.substr(0, separator);
+    }
+
+    // Resolves a short spec string to the Python module, class, and kwargs needed
+    // to construct an ASE calculator. Accepts built-in aliases for common potentials
+    // or a generic "module:Class[:kwargs]" format for anything else.
+    // After resolving, initializes Python and builds the calculator object.
     void parseCalculatorSpec(const std::string &spec,
                              std::string &moduleName,
                              std::string &className,
-                             std::string &kwargsText) { 
+                             std::string &kwargsText) {
         if (spec.empty() || spec == "lj" || spec == "lennard-jones") {
             moduleName = "ase.calculators.lj";
             className = "LennardJones";
@@ -266,14 +323,18 @@ namespace
             className = "MorsePotential";
             kwargsText.clear();
         } else if (spec == "emt") {
+            // Effective Medium Theory, a fast empirical potential for metals.
             moduleName = "ase.calculators.emt";
             className = "EMT";
             kwargsText.clear();
         } else if (spec.rfind("uma", 0) == 0) {
+            // UMA is Meta's universal ML potential. Its constructor takes the full
+            // spec string directly, so we pass it through as kwargs.
             moduleName = "uma_wrapper";
             className = "create_calculator";
             kwargsText = spec;
         } else {
+            // Generic format: "module:ClassName" or "module:ClassName:{...kwargs...}"
             size_t firstColon = spec.find(':');
             if (firstColon == std::string::npos) {
                 std::cerr << "ASE calculator spec must be empty, a known alias "
@@ -286,24 +347,35 @@ namespace
             if (secondColon == std::string::npos) {
                 className = spec.substr(firstColon + 1);
                 kwargsText.clear();
-
             } else {
                 className = spec.substr(firstColon + 1, secondColon - firstColon - 1);
                 kwargsText = spec.substr(secondColon + 1);
             }
         }
+
         ensurePythonInitialized();
 
+        // Acquire the GIL, required whenever we call into the Python C API.
         PyGILState_STATE gilState = PyGILState_Ensure();
 
-        // CHANGE TO RELATIVE
-        std::string scriptDir = "./haptic-device/";
+        // Resolve the script directory relative to the executable, not the current
+        // working directory. This makes module loading reliable when the binary is
+        // launched from any folder.
+        std::filesystem::path scriptDir = getExecutableDir();
+        if (!scriptDir.empty()) {
+            scriptDir = scriptDir / ".." / ".." / "haptic-device";
+            scriptDir = std::filesystem::weakly_canonical(scriptDir);
+        } else {
+            scriptDir = std::filesystem::path("../haptic-device");
+        }
 
+        // Append our script directory to sys.path so custom modules (e.g. uma_wrapper) are found.
         PyObject *sysPath = PySys_GetObject("path");
-        PyObject *pathStr = PyUnicode_FromString(scriptDir.c_str());
+        PyObject *pathStr = PyUnicode_FromString(scriptDir.string().c_str());
         PyList_Append(sysPath, pathStr);
         Py_DECREF(pathStr);
 
+        // Load ASE and grab the Atoms class now so we don't repeat this on every frame.
         aseModule = importModule("ase");
         atomsClass = getCallable(aseModule, "Atoms");
 
@@ -311,6 +383,7 @@ namespace
         PyObject *calcKwargs = nullptr;
 
         if (moduleName == "uma_wrapper" && className == "create_calculator") {
+            // UMA's factory function handles its own construction from the spec string.
             PyObject *wrapperModule = importModule("uma_wrapper");
             PyObject *resolver = getCallable(wrapperModule, "create_calculator");
 
@@ -324,6 +397,7 @@ namespace
                 failWithPythonError("Failed to construct UMA calculator.");
             }
         } else {
+            // Standard path: import the module, instantiate the class with optional kwargs.
             PyObject *calcModule = importModule(moduleName.c_str());
             PyObject *calcClass = getCallable(calcModule, className.c_str());
 
@@ -348,11 +422,14 @@ namespace
         PyGILState_Release(gilState);
     }
 
-    PyObject* initializeCalculator(const std::vector<Atom *> &spheres, 
-                                   const std::array<double, 9> &cellMatrix, 
+    // Builds the ASE Atoms object from the current atom configuration and attaches
+    // the calculator to it. This only runs once; on subsequent frames we update
+    // positions in-place rather than rebuilding the whole object.
+    PyObject* initializeCalculator(const std::vector<Atom *> &spheres,
+                                   const std::array<double, 9> &cellMatrix,
                                    const std::array<int, 3> &periodicBoundaryConditions) {
         PyGILState_STATE gilState = PyGILState_Ensure();
-        
+
         PyObject *atomsArgs = PyTuple_New(0);
         PyObject *atomsKwargs = PyDict_New();
         if (atomsArgs == nullptr || atomsKwargs == nullptr) {
@@ -361,6 +438,8 @@ namespace
             failWithPythonError("Failed to allocate ASE Atoms constructor arguments.");
         }
 
+        // Build each piece of the Atoms constructor call separately,
+        // then pack them into the kwargs dict.
         PyObject *numbersObject = buildNumbersList(collectAtomicNumbers(spheres));
         PyObject *cellObject = buildCellList(cellMatrix);
         PyObject *pbcObject = buildPbcList(periodicBoundaryConditions);
@@ -371,6 +450,7 @@ namespace
         PyDict_SetItemString(atomsKwargs, "pbc", pbcObject);
         PyDict_SetItemString(atomsKwargs, "positions", positionsObject);
 
+        // Some ML calculators (including UMA) require charge and spin in the info dict.
         PyObject *info = PyDict_New();
         PyDict_SetItemString(info, "charge", PyLong_FromLong(0));
         PyDict_SetItemString(info, "spin", PyLong_FromLong(1));
@@ -381,15 +461,17 @@ namespace
         Py_DECREF(cellObject);
         Py_DECREF(pbcObject);
         Py_DECREF(positionsObject);
-        
+
         PyObject *atomsObject = PyObject_Call(atomsClass, atomsArgs, atomsKwargs);
 
         Py_DECREF(atomsKwargs);
         Py_DECREF(atomsArgs);
-        
+
         if (atomsObject == nullptr) {
             failWithPythonError("Failed to construct ASE Atoms.");
         }
+        // Attaching the calculator here means ASE will use it automatically
+        // whenever get_forces() or get_potential_energy() is called.
         if (PyObject_SetAttrString(atomsObject, "calc", calcObject) != 0) {
             Py_DECREF(atomsObject);
             failWithPythonError("Failed to attach the ASE calculator to Atoms.");
@@ -399,6 +481,13 @@ namespace
     }
 
 
+    // Runs an ASE single-point calculation and returns the results as a C++ vector.
+    // The return format is: one [fx, fy, fz] entry per atom, followed by a single
+    // entry holding the total potential energy.
+    //
+    // On the first call, the Atoms object is created. On every subsequent call,
+    // only positions are updated; rebuilding Atoms each frame would be too slow
+    // and would also reset internal calculator state (e.g. neighbor lists).
     std::vector<std::vector<double>> runAseCalculation(const std::vector<Atom *> &spheres,
                                                        const std::string &moduleName,
                                                        const std::string &className,
@@ -411,18 +500,20 @@ namespace
         if (atomsObject == nullptr) {
             atomsObject = initializeCalculator(spheres, cellMatrix, periodicBoundaryConditions);
         }
-        
+
+        // Push the latest atom positions into the existing Atoms object.
         PyObject *positionsObject = buildPositionsList(flattenPositions(spheres));
         PyObject* result = PyObject_CallMethod(atomsObject, "set_positions", "O", positionsObject);
         Py_XDECREF(result);
-        
-        
+
+        // get_forces() triggers the full energy/force evaluation inside ASE.
+        // We call get_potential_energy() separately rather than extracting it from
+        // the forces result because ASE caches it after the first call, no extra cost.
         PyObject *forcesObject = PyObject_CallMethod(atomsObject, "get_forces", nullptr);
         if (forcesObject == nullptr) {
             Py_DECREF(atomsObject);
             failWithPythonError("Failed to evaluate ASE forces.");
         }
-
 
         PyObject *energyObject = PyObject_CallMethod(atomsObject, "get_potential_energy", nullptr);
         if (energyObject == nullptr)
@@ -431,6 +522,7 @@ namespace
             failWithPythonError("Failed to evaluate ASE potential energy.");
         }
 
+        // Convert the Nx3 force array from Python into a C++ vector of rows.
         PyObject *forceRows =
             PySequence_Fast(forcesObject, "ASE get_forces() result must be a sequence.");
         Py_DECREF(forcesObject);
@@ -455,7 +547,6 @@ namespace
             }
 
             PyObject **coordItems = PySequence_Fast_ITEMS(rowSequence);
-            // Scale forces back from ASE units to internal units (inverse of position scaling)
             std::vector<double> pushBack = {PyFloat_AsDouble(coordItems[0]),
                                             PyFloat_AsDouble(coordItems[1]),
                                             PyFloat_AsDouble(coordItems[2])};
@@ -464,6 +555,8 @@ namespace
         }
         Py_DECREF(forceRows);
 
+        // Append energy as the final element so callers can retrieve both forces
+        // and energy from the same return value.
         returnVector.push_back({PyFloat_AsDouble(energyObject)});
         Py_DECREF(energyObject);
         PyGILState_Release(gilState);
@@ -588,26 +681,10 @@ namespace
         return positions;
     }
 
-    std::string getExecutableDir()
-    {
-        char buffer[4096];
-        ssize_t length = readlink("/proc/self/exe", buffer, sizeof(buffer) - 1);
-        if (length <= 0)
-        {
-            return "";
-        }
+    
 
-        buffer[length] = '\0';
-        std::string executablePath(buffer);
-        size_t separator = executablePath.find_last_of('/');
-        if (separator == std::string::npos)
-        {
-            return "";
-        }
-
-        return executablePath.substr(0, separator);
-    }
-
+    // Single-quote escapes a string for safe use in a shell command.
+    // An embedded single quote must be terminated, escaped, then reopened.
     std::string quoteForShell(const std::string &value)
     {
         std::string quoted = "'";
@@ -629,6 +706,8 @@ namespace
     std::vector<std::string> getAseFileIoCandidates() {
         std::vector<std::string> candidates;
         candidates.push_back("./haptic-device/ase_file_io.py");
+        candidates.push_back("../haptic-device/ase_file_io.py");
+        candidates.push_back("../../haptic-device/ase_file_io.py");
         return candidates;
     }
 
@@ -643,6 +722,7 @@ namespace
             }
         }
 
+        // Build an informative error that lists every path we tried.
         std::ostringstream message;
         message << "Could not locate ase_file_io.py. Looked in:";
         for (const std::string &candidate : getAseFileIoCandidates())
@@ -654,6 +734,13 @@ namespace
 
 }
 
+// Loads an atom structure from a file (XYZ, CIF, etc.) by running ase_file_io.py
+// as a subprocess. We use a subprocess rather than the embedded interpreter here
+// because this only runs at load time and avoids having to manage ASE I/O state
+// alongside the simulation state.
+//
+// The script prints: atom count, positions (Nx3), atomic numbers (N),
+// cell matrix (3x3 flattened), and PBC flags (3 booleans).
 AseStructureData loadAseStructure(const std::string &filename)
 {
     AseStructureData structure;
@@ -676,6 +763,8 @@ AseStructureData loadAseStructure(const std::string &filename)
         throw std::runtime_error("ASE structure loader failed for \"" + filename + "\".");
     }
 
+    // Parse the script's stdout sequentially; the format is fixed and documented
+    // in ase_file_io.py.
     std::istringstream stream(output.str());
     int atomCount = 0;
     if (!(stream >> atomCount) || atomCount < 0) {
@@ -729,7 +818,11 @@ AseStructureData loadAseStructure(const std::string &filename)
 }
 
 ///////////////////////////// MORSE ///////////////////////////////////////
-// Force and Potential energy calculation function for the Morse calculator
+// The Morse potential models the bond between two atoms as an asymmetric well:
+// a steep repulsive wall at short range and a gradual approach to zero at large distances.
+// It's more physically accurate than LJ for bonds that can actually break.
+
+// Returns per-atom force vectors and the total potential energy (appended as the last element).
 vector<vector<double>> morseCalculator::getFandU(vector<Atom *> &spheres)
 {
     vector<vector<double>> returnVector;
@@ -737,27 +830,21 @@ vector<vector<double>> morseCalculator::getFandU(vector<Atom *> &spheres)
     Atom *current;
     for (int i = 0; i < spheres.size(); i++)
     {
-        // compute force on atom
         cVector3d force;
         current = spheres[i];
         cVector3d pos0 = current->getLocalPos();
-        // check forces with all other spheres
         force.zero();
 
-        // this loop is for finding all of atom i's neighbors
+        // Sum contributions from every other atom.
         for (int j = 0; j < spheres.size(); j++)
         {
-            // Don't compute forces between an atom and itself
             if (i != j)
             {
-                // get position of sphere
                 cVector3d pos1 = spheres[j]->getLocalPos();
 
-                // compute direction vector from sphere 0 to 1
-
+                // Unit vector from j toward i, defines the direction of the force on atom i.
                 cVector3d dir01 = cNormalize(pos0 - pos1);
 
-                // compute distance between both spheres
                 double distance = cDistance(pos0, pos1) / distanceScale;
                 potentialEnergy += getMorseEnergy(distance);
                 double appliedForce = getMorseForce(distance);
@@ -767,21 +854,25 @@ vector<vector<double>> morseCalculator::getFandU(vector<Atom *> &spheres)
         vector<double> pushBack = {force.x(), force.y(), force.z()};
         returnVector.push_back(pushBack);
     }
-    // Potential energy -- Halve it because pairwise
+    // Each pair (i,j) was counted twice, once from i's perspective and once from j's.
+    // Dividing by 2 gives the true total energy.
     vector<double> potentE = {potentialEnergy / 2};
     returnVector.push_back(potentE);
 
     return returnVector;
 }
 
-// Pairwise energy calculation for morse
+// U(r) = epsilon * exp(rho0*(1 - r/r0)) * (exp(rho0*(1 - r/r0)) - 2)
+// Energy is zero at large r, reaches minimum -epsilon at r = r0,
+// and rises steeply as r approaches zero.
 double morseCalculator::getMorseEnergy(double distance)
 {
     double expf = exp(rho0 * (1.0 - distance / r0));
     return epsilon * expf * (expf - 2);
 }
 
-// Pairwise force calculation for morseCalculator
+// F(r) = -dU/dr, projected onto the bond axis.
+// forceDamping scales output to a range suitable for the haptic device.
 double morseCalculator::getMorseForce(double distance)
 {
     double temp = -2 * rho0 * epsilon * exp(rho0 - (2 * rho0 * distance) / r0) *
@@ -790,7 +881,11 @@ double morseCalculator::getMorseForce(double distance)
 }
 
 //////////////////////////////// LJ ///////////////////////////////////////
-// Force and Potential energy calculation function for the lj calculator
+// The Lennard-Jones potential uses a 12-6 form: the r^-12 term handles short-range
+// repulsion and the r^-6 term handles the longer-range van der Waals attraction.
+// It's fast to compute but less physical than Morse for covalent bonds.
+
+// Returns per-atom force vectors and the total potential energy (appended as the last element).
 vector<vector<double>> ljCalculator::getFandU(vector<Atom *> &spheres)
 {
     vector<vector<double>> returnVector;
@@ -798,27 +893,19 @@ vector<vector<double>> ljCalculator::getFandU(vector<Atom *> &spheres)
     Atom *current;
     for (int i = 0; i < spheres.size(); i++)
     {
-        // compute force on atom
         cVector3d force;
         current = spheres[i];
         cVector3d pos0 = current->getLocalPos();
-        // check forces with all other spheres
         force.zero();
 
-        // this loop is for finding all of atom i's neighbors
         for (int j = 0; j < spheres.size(); j++)
         {
-            // Don't compute forces between an atom and itself
             if (i != j)
             {
-                // get position of sphere
                 cVector3d pos1 = spheres[j]->getLocalPos();
-
-                // compute direction vector from sphere 0 to 1
 
                 cVector3d dir01 = cNormalize(pos0 - pos1);
 
-                // compute distance between both spheres
                 double distance = cDistance(pos0, pos1) / distanceScale;
                 potentialEnergy += getLennardJonesEnergy(distance);
                 double appliedForce = getLennardJonesForce(distance);
@@ -828,20 +915,20 @@ vector<vector<double>> ljCalculator::getFandU(vector<Atom *> &spheres)
         vector<double> pushBack = {force.x(), force.y(), force.z()};
         returnVector.push_back(pushBack);
     }
-    // Potential energy -- halve it because pairwise
+    // Divide by 2 to correct for double-counting each pair.
     vector<double> potentE = {potentialEnergy / 2};
     returnVector.push_back(potentE);
 
     return returnVector;
 }
 
-// Pairwise energy calculation for lj
+// U(r) = 4*epsilon * [(sigma/r)^12 - (sigma/r)^6]
 double ljCalculator::getLennardJonesEnergy(double distance)
 {
     return 4 * epsilon * (pow(sigma / distance, 12) - pow(sigma / distance, 6));
 }
 
-// Pairwise force calculation for lj
+// F(r) = -dU/dr along the bond axis.
 double ljCalculator::getLennardJonesForce(double distance)
 {
     return -4 * epsilon *
@@ -849,10 +936,16 @@ double ljCalculator::getLennardJonesForce(double distance)
 }
 
 ////////////////////////////////// ase //////////////////////////////////////
+// The ASE calculator hands off force and energy evaluation to Python.
+// This lets us use any ASE-compatible potential (classical, semi-empirical,
+// or ML-based) without recompiling the C++ code.
+
 aseCalculator::aseCalculator(const std::string &cName,
                              const std::array<double, 9> &cellMatrix,
                              const std::array<int, 3> &periodicBoundaryConditions)
     : cell(cellMatrix), pbc(periodicBoundaryConditions) {
+    // parseCalculatorSpec initializes Python, loads the requested calculator module,
+    // and stores a handle to the calculator object for use in getFandU.
     parseCalculatorSpec(cName, calculatorModule, calculatorClass, calculatorKwargs);
 }
 

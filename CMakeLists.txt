@@ -32,6 +32,7 @@ set(HAPTIC_DEVICE_SOURCES
   atom.cpp
   boundaryConditions.cpp
   inputHandling.cpp
+  ipcServer.cpp
   potentials.cpp
   utility.cpp
 )
@@ -57,6 +58,10 @@ target_link_libraries(haptic-device PRIVATE
 if(CMAKE_SYSTEM_NAME MATCHES "Linux")
   target_compile_options(haptic-device PRIVATE -fno-PIE -no-pie)
   target_link_options(haptic-device PRIVATE -no-pie)
+endif()
+
+if(CMAKE_SYSTEM_NAME MATCHES "Windows")
+  target_link_libraries(haptic-device PRIVATE ws2_32)
 endif()
 
 if(CMAKE_SYSTEM_NAME MATCHES "Windows")

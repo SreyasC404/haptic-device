@@ -3,6 +3,14 @@ Code for the FRI haptic device project
 
 **NOTE:** When launching the program, you may need to calibrate the device by pushing it in and out until it is recognized.
 
+## Desktop Launcher
+
+`launcher/` contains a cross-platform (Mac/Windows) PySide6 GUI for
+configuring parameters and launching `haptic-device`, plus a "Live controls"
+panel (freeze, haptic mode, potential, anchors) that talks to a loopback IPC
+server built into `LJ.cpp` while the simulation is running. See
+[launcher/README.md](launcher/README.md) for setup and usage.
+
 ## OPTIONS
 Specify the # of atoms at launch like so:
 ```
@@ -31,8 +39,23 @@ ASE calculator spec:
 ./haptic-device structure.xyz ase ase.calculators.emt:EMT
 ./haptic-device structure.xyz ase ase.calculators.lj:LennardJones:{'sigma': 2.5, 'epsilon': 0.8}
 ```
-Supported ASE shortcuts are `lj`, `morse`, and `emt`. For any other ASE
-calculator, use `module:Class[:kwargs]`.
+Supported ASE shortcuts are `lj`, `morse`, `emt`, and `uma` (Meta's universal
+ML potential; `uma:omol`, `uma:omat`, `uma:oc20` select the prediction head).
+For any other ASE calculator, use `module:Class[:kwargs]`.
+
+A fifth argument controls periodic boundary conditions: `on` forces PBC on,
+`off` forces it off, and `keep` (or omitting the argument) leaves whatever
+the loaded structure file specified untouched:
+```
+./haptic-device 25 lj "" off
+```
+(the empty 4th argument is a placeholder for the ASE calculator spec, which
+is only meaningful when the potential is `ase`)
+
+The simulation time step (seconds) can be set at launch via the
+`HAPTIC_DEVICE_TIME_STEP` environment variable (default `0.001`, valid range
+`0.0001`-`0.005`), and changed live while running through the desktop
+launcher or the IPC command server (see below).
 
 ## Build Instructions
 
